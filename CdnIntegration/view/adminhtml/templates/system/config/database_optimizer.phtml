@@ -1,0 +1,544 @@
+<?php
+/**
+ * @var $block \MagoArab\CdnIntegration\Block\Adminhtml\System\Config\DatabaseOptimizer
+ */
+?>
+<div id="database-loader" data-role="loader" class="loading-mask" style="display: none; position: absolute; z-index: 1000; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, 0.6);">
+    <div class="loader" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);">
+        <img src="<?= $block->getViewFileUrl('images/loader-1.gif') ?>" alt="<?= __('Loading...') ?>">
+        <p><?= __('Analyzing database...') ?></p>
+    </div>
+</div>
+
+<div class="actions actions-analyze-database">
+    <?= $block->getButtonHtml() ?>
+    <?= $block->getOptimizeButtonHtml() ?>
+</div>
+
+<div id="database-analysis-results" style="display: none; margin-top: 20px;">
+    <div class="result-container" style="background: #f8f8f8; border: 1px solid #e3e3e3; border-radius: 4px; padding: 15px; margin-bottom: 20px;">
+        <h4 style="margin-top: 0;"><?= __('Largest Database Tables') ?></h4>
+        <p class="result-summary"></p>
+        
+        <div class="table-container" style="max-height: 300px; overflow-y: auto; margin-bottom: 15px;">
+            <table class="data-grid" style="width: 100%;">
+                <thead>
+                    <tr>
+                        <th class="data-grid-checkbox-cell">
+                            <input type="checkbox" id="select-all-tables" title="<?= __('Select All') ?>">
+                        </th>
+                        <th><?= __('Table Name') ?></th>
+                        <th><?= __('Size (MB)') ?></th>
+                        <th><?= __('Rows') ?></th>
+                        <th><?= __('Fragmented Space (MB)') ?></th>
+                        <th><?= __('Engine') ?></th>
+                        <th><?= __('Status') ?></th>
+                    </tr>
+                </thead>
+                <tbody id="tables-list">
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <div id="optimization-results" style="display: none; background: #f0f9e8; border: 1px solid #c5e1a5; border-radius: 4px; padding: 15px; margin-bottom: 20px;">
+        <h4 style="margin-top: 0;"><?= __('Optimization Results') ?></h4>
+        <p class="optimization-summary"></p>
+        
+ 
+        
+        <div id="detailed-results" style="margin-top: 15px;">
+            <h5><?= __('Detailed Results') ?></h5>
+            <div class="detailed-results-container" style="max-height: 200px; overflow-y: auto;">
+                <table class="data-grid" style="width: 100%;">
+                    <thead>
+                        <tr>
+                            <th><?= __('Table Name') ?></th>
+                            <th><?= __('Size Before (MB)') ?></th>
+                            <th><?= __('Size After (MB)') ?></th>
+                            <th><?= __('Space Saved (MB)') ?></th>
+                            <th><?= __('Improvement') ?></th>
+                        </tr>
+                    </thead>
+                    <tbody id="detailed-results-list">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+require([
+    'jquery',
+    'Magento_Ui/js/modal/alert',
+    'mage/translate',
+    'chartjs'
+], function ($, alert, $t, Chart) {
+    'use strict';
+    
+    var spaceSavedChart = null;
+    var beforeAfterChart = null;
+    var analyzedTables = [];
+    
+ // Handle analyze database button
+$('#analyze_database_button').click(function (event) {
+    event.preventDefault();
+    
+    $(this).prop('disabled', true);
+    $(this).text($t('Analyzing...'));
+    
+    // Reset UI
+    $('#optimization-results').hide();
+    $('#tables-list').empty();
+    $('#detailed-results-list').empty();
+    
+    // Show loading indicator manually
+    $('#database-loader').show();
+    
+    $.ajax({
+        url: '<?= $block->escapeJs($block->getAjaxUrl()) ?>',
+        type: 'POST',
+        dataType: 'json',
+        data: {
+            form_key: window.FORM_KEY
+        },
+        // Remove these since we're handling them manually
+        // beforeSend: function() {
+        //     $('#database-loader').show();
+        // },
+        // complete: function() {
+        //     $('#database-loader').hide();
+        // },
+        success: function (response) {
+            // Hide loading indicator first
+            $('#database-loader').hide();
+            
+            if (response.success) {
+                $('#database-analysis-results').show();
+                analyzedTables = response.tables || [];
+                
+                if (analyzedTables.length > 0) {
+                    $('.result-summary').text(
+                        $t('Found %1 large tables that may benefit from optimization.').replace('%1', analyzedTables.length)
+                    );
+                    
+                    // Populate table list
+                    var totalSize = 0;
+                    var totalFragmented = 0;
+                    
+                    $.each(analyzedTables, function(index, table) {
+                        totalSize += parseFloat(table.size || 0);
+                        totalFragmented += parseFloat(table.fragmented_size || 0);
+                        
+                        var fragSize = parseFloat(table.fragmented_size || 0);
+                        var needsOptimization = fragSize > 1; // More than 1MB fragmented space
+                        var statusHtml = needsOptimization ? 
+                            '<span class="grid-severity-critical"><span>' + $t('Needs Optimization') + '</span></span>' : 
+                            '<span class="grid-severity-notice"><span>' + $t('Good') + '</span></span>';
+                        
+                        $('#tables-list').append(
+                            '<tr>' +
+                            '<td class="data-grid-checkbox-cell">' +
+                                '<input type="checkbox" name="tables[]" value="' + table.table + '" ' + 
+                                (needsOptimization ? 'checked="checked"' : '') + '>' +
+                            '</td>' +
+                            '<td>' + table.table + '</td>' +
+                            '<td>' + parseFloat(table.size || 0).toFixed(2) + '</td>' +
+                            '<td>' + (table.rows ? table.rows : '0') + '</td>' +
+                            '<td>' + (fragSize > 0 ? fragSize.toFixed(2) : '0.00') + '</td>' +
+                            '<td>' + table.engine + '</td>' +
+                            '<td>' + statusHtml + '</td>' +
+                            '</tr>'
+                        );
+                    });
+                    
+                    // Add summary row
+                    $('#tables-list').append(
+                        '<tr class="summary-row" style="font-weight: bold; background: #f0f0f0;">' +
+                        '<td></td>' +
+                        '<td>' + $t('Total') + '</td>' +
+                        '<td>' + totalSize.toFixed(2) + '</td>' +
+                        '<td>-</td>' +
+                        '<td>' + totalFragmented.toFixed(2) + '</td>' +
+                        '<td>-</td>' +
+                        '<td>-</td>' +
+                        '</tr>'
+                    );
+                    
+                   // Enable optimize button - make sure the button is enabled properly
+$('#optimize_database_button')
+    .removeAttr('disabled')
+    .attr('disabled', false)
+    .prop('disabled', false)
+    .css('opacity', '1')
+    .css('cursor', 'pointer');
+
+console.log('Optimize button should be enabled now:', $('#optimize_database_button').prop('disabled'));
+                } else {
+                    $('.result-summary').text($t('No tables found that need optimization.'));
+                }
+            } else {
+                alert({
+                    title: $t('Error'),
+                    content: response.message || $t('Unknown error occurred during database analysis.')
+                });
+                $('#database-analysis-results').hide();
+            }
+        },
+        error: function (xhr, status, error) {
+            // Hide loading indicator
+            $('#database-loader').hide();
+            
+            console.error('Database analysis AJAX error:', status, error);
+            alert({
+                title: $t('Error'),
+                content: $t('An error occurred during database analysis: ') + (error || $t('Unknown error'))
+            });
+            $('#database-analysis-results').hide();
+        },
+        complete: function () {
+            // Hide loading indicator and re-enable button
+            $('#database-loader').hide();
+            $('#analyze_database_button').prop('disabled', false);
+            $('#analyze_database_button').text($t('Analyze Database'));
+        }
+    });
+});
+    
+    // Handle select all checkbox
+    $(document).on('click', '#select-all-tables', function() {
+        $('input[name="tables[]"]').prop('checked', $(this).prop('checked'));
+    });
+    
+    // Handle optimize button
+$('#optimize_database_button').click(function (event) {
+    event.preventDefault();
+    
+    var selectedTables = [];
+    $('input[name="tables[]"]:checked').each(function() {
+        selectedTables.push($(this).val());
+    });
+    
+    console.log('Selected tables for optimization:', selectedTables);
+    
+    if (selectedTables.length === 0) {
+        alert({
+            title: $t('No Tables Selected'),
+            content: $t('Please select at least one table to optimize.')
+        });
+        return;
+    }
+    
+    $(this).prop('disabled', true);
+    $(this).text($t('Optimizing...'));
+    
+    // Show loading indicator manually
+    $('#database-loader').show();
+    
+    $.ajax({
+        url: '<?= $block->escapeJs($block->getOptimizeUrl()) ?>',
+        type: 'POST',
+        dataType: 'json',
+        data: {
+            form_key: window.FORM_KEY,
+            tables: selectedTables
+        },
+        success: function (response) {
+            console.log('Optimization response:', response);
+            
+            // Hide loading indicator
+            $('#database-loader').hide();
+            
+            if (response && response.success) {
+                displayOptimizationResults(response.result);
+            } else {
+                alert({
+                    title: $t('Error'),
+                    content: (response && response.message) ? response.message : $t('An unknown error occurred during optimization.')
+                });
+            }
+        },
+        error: function (xhr, status, error) {
+            // Hide loading indicator
+            $('#database-loader').hide();
+            
+            console.error('Optimization AJAX error:', status, error, xhr);
+            alert({
+                title: $t('Error'),
+                content: $t('An error occurred during database optimization: ') + (error || $t('Unknown error'))
+            });
+        },
+        complete: function () {
+            // Make sure loading indicator is hidden and button is re-enabled
+            $('#database-loader').hide();
+            $('#optimize_database_button').prop('disabled', false);
+            $('#optimize_database_button').text($t('Optimize Tables'));
+        }
+    });
+});
+    
+function displayOptimizationResults(result) {
+    console.log('Displaying optimization results:', result);
+    
+    $('#optimization-results').show();
+    $('#detailed-results-list').empty();
+    
+    if (!result || !result.optimized || result.optimized.length === 0) {
+        $('.optimization-summary').html($t('No tables were optimized.'));
+        return;
+    }
+    
+    var totalSaved = 0;
+    var totalBefore = 0;
+    var totalAfter = 0;
+    
+    // Prepare data for detailed results and charts
+    var tableNames = [];
+    var spaceBeforeData = [];
+    var spaceAfterData = [];
+    var spaceSavedData = [];
+    
+    $.each(result.optimized, function(index, tableResult) {
+        var tableName = tableResult.table;
+        var sizeBefore = parseFloat(tableResult.before.size) || 0;
+        var sizeAfter = parseFloat(tableResult.after.size) || 0;
+        var spaceSaved = parseFloat(tableResult.saved) || 0;
+        
+        // تجنب القيم السالبة في التوفير
+        if (spaceSaved < 0) spaceSaved = 0;
+        
+        var improvementPct = sizeBefore > 0 ? ((spaceSaved / sizeBefore) * 100).toFixed(2) + '%' : '0.00%';
+        
+        totalSaved += spaceSaved;
+        totalBefore += sizeBefore;
+        totalAfter += sizeAfter;
+        
+        // Only add to chart if there's actual data
+        if (sizeBefore > 0 || sizeAfter > 0 || spaceSaved > 0) {
+            tableNames.push(tableName);
+            spaceBeforeData.push(sizeBefore);
+            spaceAfterData.push(sizeAfter);
+            spaceSavedData.push(spaceSaved);
+        }
+        
+        $('#detailed-results-list').append(
+            '<tr>' +
+            '<td>' + tableName + '</td>' +
+            '<td>' + sizeBefore.toFixed(2) + '</td>' +
+            '<td>' + sizeAfter.toFixed(2) + '</td>' +
+            '<td>' + spaceSaved.toFixed(2) + '</td>' +
+            '<td>' + improvementPct + '</td>' +
+            '</tr>'
+        );
+    });
+    
+    // Add summary row
+    $('#detailed-results-list').append(
+        '<tr class="summary-row" style="font-weight: bold; background: #f0f0f0;">' +
+        '<td>' + $t('Total') + '</td>' +
+        '<td>' + totalBefore.toFixed(2) + '</td>' +
+        '<td>' + totalAfter.toFixed(2) + '</td>' +
+        '<td>' + totalSaved.toFixed(2) + '</td>' +
+        '<td>' + (totalBefore > 0 ? ((totalSaved / totalBefore) * 100).toFixed(2) + '%' : '0.00%') + '</td>' +
+        '</tr>'
+    );
+    
+    $('.optimization-summary').html(
+        $t('Successfully optimized %1 tables, saving %2 MB of database space (%3% improvement).')
+        .replace('%1', result.optimized.length)
+        .replace('%2', totalSaved.toFixed(2))
+        .replace('%3', (totalBefore > 0 ? ((totalSaved / totalBefore) * 100).toFixed(2) : '0.00'))
+    );
+    
+    // تحقق مما إذا كان لدينا بيانات قبل محاولة رسم المخططات
+    if (tableNames.length > 0) {
+        try {
+            // Use simple charts instead of Chart.js
+            drawSimpleBarChart('#space-saved-chart', tableNames, spaceSavedData, $t('Space Saved by Optimization'));
+            drawSimpleBarChart('#before-after-chart', tableNames, [spaceBeforeData, spaceAfterData], $t('Before vs After Optimization'));
+        } catch (e) {
+            console.error('Error drawing charts:', e);
+            $('#space-saved-chart, #before-after-chart').html('<div style="color:red;">Error drawing chart</div>');
+        }
+    } else {
+        $('#space-saved-chart').html('<div style="text-align:center;padding:20px;">' + $t('No significant changes to display') + '</div>');
+        $('#before-after-chart').html('<div style="text-align:center;padding:20px;">' + $t('No significant changes to display') + '</div>');
+    }
+}
+
+// تنفيذ رسم مخطط بسيط بدون الاعتماد على Chart.js
+function drawSimpleBarChart(selector, labels, data, title) {
+    var container = $(selector);
+    container.empty();
+    
+    var html = '<h4>' + title + '</h4><div class="simple-chart" style="height:250px;position:relative;margin-top:20px;">';
+    
+    // التعامل مع مصفوفة بيانات واحدة أو مصفوفتين
+    var isTwoDatasets = Array.isArray(data[0]);
+    var dataset1 = isTwoDatasets ? data[0] : data;
+    var dataset2 = isTwoDatasets ? data[1] : null;
+    
+    // العثور على أقصى قيمة للمقياس
+    var maxValue = 0;
+    dataset1.forEach(function(val) { if (val > maxValue) maxValue = val; });
+    if (dataset2) {
+        dataset2.forEach(function(val) { if (val > maxValue) maxValue = val; });
+    }
+    if (maxValue === 0) maxValue = 1; // لتجنب القسمة على صفر
+    
+    // حساب عرض الأعمدة
+    var barWidth = 100 / (labels.length * (isTwoDatasets ? 3 : 2)); // الفجوات + الأعمدة
+    
+    // إنشاء الأعمدة
+    for (var i = 0; i < labels.length; i++) {
+        // المجموعة الأولى من البيانات
+        var value1 = dataset1[i] || 0;
+        var height1 = (value1 / maxValue) * 80; // 80% من ارتفاع المخطط للأعمدة
+        var left1 = i * (isTwoDatasets ? barWidth * 3 : barWidth * 2) + barWidth / 2;
+        
+        html += '<div style="position:absolute;bottom:25px;left:' + left1 + '%;width:' + barWidth + '%;height:' + height1 + '%;' +
+               'background-color:' + (isTwoDatasets ? 'rgba(255,99,132,0.6)' : 'rgba(75,192,192,0.6)') + ';' +
+               'border:1px solid ' + (isTwoDatasets ? 'rgba(255,99,132,1)' : 'rgba(75,192,192,1)') + ';">' +
+               '<div style="position:absolute;top:-20px;width:100%;text-align:center;font-size:10px;">' + 
+               value1.toFixed(2) + '</div></div>';
+        
+        // المجموعة الثانية من البيانات (إذا كانت موجودة)
+        if (isTwoDatasets) {
+            var value2 = dataset2[i] || 0;
+            var height2 = (value2 / maxValue) * 80;
+            var left2 = left1 + barWidth;
+            
+            html += '<div style="position:absolute;bottom:25px;left:' + left2 + '%;width:' + barWidth + '%;height:' + height2 + '%;' +
+                   'background-color:rgba(54,162,235,0.6);border:1px solid rgba(54,162,235,1);">' +
+                   '<div style="position:absolute;top:-20px;width:100%;text-align:center;font-size:10px;">' + 
+                   value2.toFixed(2) + '</div></div>';
+        }
+    }
+    
+    // إضافة ملاحظات
+    html += '<div style="position:absolute;bottom:0;left:0;width:100%;height:25px;">';
+    for (var i = 0; i < labels.length; i++) {
+        var left = i * (isTwoDatasets ? barWidth * 3 : barWidth * 2) + barWidth / 2;
+        var width = isTwoDatasets ? barWidth * 2 : barWidth;
+        
+        html += '<div style="position:absolute;bottom:0;left:' + left + '%;width:' + width + '%;overflow:hidden;' +
+               'white-space:nowrap;text-overflow:ellipsis;text-align:center;font-size:10px;" title="' + labels[i] + '">' +
+               (labels[i].length > 15 ? labels[i].substr(0, 15) + '...' : labels[i]) + '</div>';
+    }
+    html += '</div>';
+    
+    // مفتاح المخطط
+    if (isTwoDatasets) {
+        html += '<div style="position:absolute;top:0;right:0;font-size:10px;">' +
+               '<span style="display:inline-block;width:10px;height:10px;background-color:rgba(255,99,132,0.6);' +
+               'border:1px solid rgba(255,99,132,1);margin-right:5px;"></span>' +
+               '<span>' + $t('Size Before (MB)') + '</span>' +
+               '<span style="display:inline-block;width:10px;height:10px;background-color:rgba(54,162,235,0.6);' +
+               'border:1px solid rgba(54,162,235,1);margin:0 5px 0 15px;"></span>' +
+               '<span>' + $t('Size After (MB)') + '</span>' +
+               '</div>';
+    }
+    
+    html += '</div>';
+    container.html(html);
+}
+    
+    function drawSpaceSavedChart(labels, data) {
+        var chartElement = document.getElementById('space-saved-chart');
+        if (!chartElement) {
+            console.error('Chart element not found: space-saved-chart');
+            return;
+        }
+        
+        try {
+            var ctx = chartElement.getContext('2d');
+            
+            if (spaceSavedChart) {
+                spaceSavedChart.destroy();
+            }
+            
+            spaceSavedChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: $t('Space Saved (MB)'),
+                        data: data,
+                        backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: $t('MB')
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Error drawing chart:', error);
+        }
+    }
+    
+    function drawBeforeAfterChart(labels, beforeData, afterData) {
+        var chartElement = document.getElementById('before-after-chart');
+        if (!chartElement) {
+            console.error('Chart element not found: before-after-chart');
+            return;
+        }
+        
+        try {
+            var ctx = chartElement.getContext('2d');
+            
+            if (beforeAfterChart) {
+                beforeAfterChart.destroy();
+            }
+            
+            beforeAfterChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: $t('Size Before (MB)'),
+                            data: beforeData,
+                            backgroundColor: 'rgba(255, 99, 132, 0.6)',
+                            borderColor: 'rgba(255, 99, 132, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: $t('Size After (MB)'),
+                            data: afterData,
+                            backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                            borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: $t('MB')
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Error drawing chart:', error);
+        }
+    }
+});
+</script>
